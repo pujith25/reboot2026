@@ -24,6 +24,15 @@ public class MortgageStatusContract implements ContractInterface {
 
     private final Genson genson = new Genson();
 
+    private void requireMSP(Context ctx, String expectedMspId) {
+
+        String mspId = ctx.getClientIdentity().getMSPID();
+
+        if (!expectedMspId.equals(mspId)) {
+            throw new RuntimeException("Only " + expectedMspId + " can perform this transaction.");
+        }
+    }
+
     /**
      * Check whether a mortgage case exists.
      */
@@ -56,12 +65,9 @@ public class MortgageStatusContract implements ContractInterface {
 
         ChaincodeStub stub = ctx.getStub();
 
-        // Only Org1 can create mortgage cases
-        String mspId = ctx.getClientIdentity().getMSPID();
+        requireMSP(ctx, "Org1MSP");
 
-        if (!"Org1MSP".equals(mspId)) {
-            throw new RuntimeException("Only Broker (Org1MSP) can create mortgage cases.");
-        }
+        String mspId = ctx.getClientIdentity().getMSPID();
 
         // Check if case already exists
         if (caseExists(ctx, caseId)) {
@@ -109,6 +115,54 @@ public class MortgageStatusContract implements ContractInterface {
         stub.setEvent(
                 "CaseCreated",
                 mortgageJson.getBytes(StandardCharsets.UTF_8));
+    }
+
+    /**
+     * Move a case from CASE_CREATED to CONVEYANCER_ASSIGNED.
+     */
+    @Transaction(intent = Transaction.TYPE.SUBMIT)
+    public void assignConveyancer(Context ctx, String caseId, String conveyancerName) {
+
+        ChaincodeStub stub = ctx.getStub();
+
+        requireMSP(ctx, "Org1MSP");
+
+        String mortgageJson = stub.getStringState(caseId);
+
+        if (mortgageJson == null || mortgageJson.isEmpty()) {
+            throw new RuntimeException("Mortgage case not found.");
+        }
+
+        MortgageCase mortgageCase = genson.deserialize(mortgageJson, MortgageCase.class);
+
+        MortgageStatus currentStatus = MortgageStatus.valueOf(mortgageCase.getStatusCode());
+
+        if (!MortgageStatusValidator.isValidTransition(
+                currentStatus,
+                MortgageStatus.CONVEYANCER_ASSIGNED)) {
+            throw new RuntimeException(
+                    "Invalid status transition from " + currentStatus + " to CONVEYANCER_ASSIGNED.");
+        }
+
+        String mspId = ctx.getClientIdentity().getMSPID();
+
+        mortgageCase.setConveyancerName(conveyancerName);
+        mortgageCase.setStatusCode(MortgageStatus.CONVEYANCER_ASSIGNED.name());
+        mortgageCase.setStatusLabel("Conveyancer Assigned");
+        mortgageCase.setUpdatedByRole("CONVEYANCER");
+        mortgageCase.setUpdatedByOrg(mspId);
+        mortgageCase.setUpdatedBy("System");
+        mortgageCase.setTimestamp(stub.getTxTimestamp().toString());
+        mortgageCase.setNextExpectedStatus(MortgageStatus.TITLE_CHECKS_IN_PROGRESS.name());
+        mortgageCase.setNextExpectedEvent(MortgageStatus.TITLE_CHECKS_IN_PROGRESS.name());
+
+        String updatedMortgageJson = genson.serialize(mortgageCase);
+
+        stub.putStringState(caseId, updatedMortgageJson);
+
+        stub.setEvent(
+                "ConveyancerAssigned",
+                updatedMortgageJson.getBytes(StandardCharsets.UTF_8));
     }
 
     /**
